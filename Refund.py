@@ -9,18 +9,19 @@ st.markdown("<h2 style='text-align:center;'>Refund Panel</h2>", unsafe_allow_htm
 st.write("")
 
 # =========================
-# File Upload
+# FILE UPLOAD
 # =========================
-uploaded_file = st.file_uploader("Upload Allotment File (CSV / Excel)", type=["csv", "xlsx", "xls"])
+uploaded_file = st.file_uploader("Upload Allotment File (CSV / Excel)", 
+                                 type=["csv", "xlsx", "xls"])
 
 if uploaded_file is None:
     st.info("Please upload the allotment file to begin.")
     st.stop()
 
-# Detect input format
-name = uploaded_file.name.lower()
+# Detect file type
+file_name = uploaded_file.name.lower()
 try:
-    if name.endswith(".csv"):
+    if file_name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
@@ -31,8 +32,9 @@ except Exception as e:
 st.subheader("Input Data")
 st.dataframe(df, use_container_width=True)
 
+
 # =========================
-# Required Columns
+# REQUIRED COLUMNS
 # =========================
 required_cols = [
     "regfeepaid", "forefit",
@@ -41,16 +43,19 @@ required_cols = [
     "JoinStray", "Stray"
 ]
 
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    st.error(f"Missing required columns: {missing}")
+missing_cols = [c for c in required_cols if c not in df.columns]
+if missing_cols:
+    st.error(f"Missing required columns: {missing_cols}")
     st.stop()
 
-# Cleanup numeric fields
+# Ensure numeric fields are clean
 df["regfeepaid"] = pd.to_numeric(df["regfeepaid"], errors="coerce").fillna(0)
 df["forefit"] = pd.to_numeric(df["forefit"], errors="coerce").fillna(0)
 
-# Helper functions
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
 def sval(x):
     if pd.isna(x):
         return ""
@@ -61,13 +66,14 @@ def sstatus(x):
 
 
 # =========================
-# REFUND CALCULATION LOGIC
+# MAIN REFUND LOGIC
 # =========================
 def compute_refund(row):
-    reg_paid = row.get("regfeepaid", 0) or 0
-    existing_forefit = row.get("forefit", 0) or 0
 
-    # Statuses
+    reg_paid = row.get("regfeepaid", 0)
+    existing_forefit = row.get("forefit", 0)
+
+    # Extract status fields
     js1 = sstatus(row.get("JoinStatus_1", ""))
     js2 = sstatus(row.get("JoinStatus_2", ""))
     js3 = sstatus(row.get("JoinStatus_3", ""))
@@ -79,13 +85,13 @@ def compute_refund(row):
     allot3 = sval(row.get("Allot_3", ""))
     stray = sval(row.get("Stray", ""))
 
-    refund = 0.0
+    refund = 0
     new_forefit = existing_forefit
     reason = "Check manually"
 
-    # ----------------------------------------------------------------------
-    # 1) No allotment anywhere → FULL REFUND
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------
+    # 1) NO ALLOTMENT ANYWHERE → FULL REFUND
+    # -------------------------------------------------
     if allot1 == "" and allot2 == "" and allot3 == "" and stray == "":
         refund = reg_paid
         reason = "No allotment – full refund"
@@ -95,15 +101,16 @@ def compute_refund(row):
             "RefundCategory": reason
         })
 
-    # ----------------------------------------------------------------------
-    # 2) Joined in Phase 1 or 2 → FULL REFUND unless later TC
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------
+    # 2) JOINED IN PHASE 1 OR 2
+    # -------------------------------------------------
     if js1 == "Y" or js2 == "Y":
-        # If they later took TC → NO REFUND
+
+        # If later TC → NO REFUND
         if "TC" in (js1, js2, js3):
             refund = 0
             new_forefit = existing_forefit + reg_paid
-            reason = "Joined then TC → No refund"
+            reason = "Joined then TC – no refund"
         else:
             refund = reg_paid
             reason = "Joined in phase 1/2 – full refund"
@@ -114,33 +121,58 @@ def compute_refund(row):
             "RefundCategory": reason
         })
 
-    # ----------------------------------------------------------------------
-    # 3) Not joined in 1 & 2, but joined in Phase 3 or Stray → FULL REFUND
-    # ----------------------------------------------------------------------
-    if js1 == "" and js2 == "" and (js3 == "Y" or join_stray == "Y"):
-        refund = reg_paid
-        reason = "Joined in phase 3 / Stray – full refund"
-        return pd.Series({
-            "RefundAmount": refund,
-            "NewForefit": existing_forefit,
-            "RefundCategory": reason
-        })
+    # -------------------------------------------------
+    # 3) PHASE 3 / STRAY LOGIC
+    # -------------------------------------------------
+    # Candidate did NOT join in Ph1 & Ph2
+    if js1 == "" and js2 == "":
 
-    # ----------------------------------------------------------------------
-    # 4) Not joined / TC in Phase 1 & 2 → NO REFUND
-    # ----------------------------------------------------------------------
-    cond_not_join_1_2 = js1 in ("N", "TC") and js2 in ("N", "TC")
+        # Joined in Phase 3 → FULL REFUND
+        if js3 == "Y":
+            refund = reg_paid
+            reason = "Joined in phase 3 – full refund"
+            return pd.Series({
+                "RefundAmount": refund,
+                "NewForefit": existing_forefit,
+                "RefundCategory": reason
+            })
 
-    if cond_not_join_1_2:
-        # If also Not Joined in Phase 3 → NEW PAYMENT ALSO FORFEIT
+        # Joined through stray (JoinStray=Y AND actual join (js3='Y'))
+        if join_stray == "Y" and js3 == "Y":
+            refund = reg_paid
+            reason = "Joined via stray – full refund"
+            return pd.Series({
+                "RefundAmount": refund,
+                "NewForefit": existing_forefit,
+                "RefundCategory": reason
+            })
+
+        # Stray allotted but candidate DID NOT JOIN → NO REFUND
+        if join_stray == "Y" and js3 != "Y":
+            refund = 0
+            new_forefit = existing_forefit + reg_paid
+            reason = "Stray allotted but NOT joined – no refund"
+            return pd.Series({
+                "RefundAmount": refund,
+                "NewForefit": new_forefit,
+                "RefundCategory": reason
+            })
+
+    # -------------------------------------------------
+    # 4) NOT JOINED / TC IN PHASE 1 & 2 → FORFEIT
+    # -------------------------------------------------
+    if js1 in ("N", "TC") and js2 in ("N", "TC"):
+
+        # If also not joined in Phase 3 → forfeit
         if js3 == "N":
             refund = 0
             new_forefit = existing_forefit + reg_paid
-            reason = "Not joined in 1/2/3 → Forfeit"
+            reason = "Not joined in 1/2/3 – forfeit"
+
         else:
             refund = 0
             new_forefit = existing_forefit + reg_paid
-            reason = "Not joined in phase 1/2 → Forfeit"
+            reason = "Not joined in 1/2 – forfeit"
 
         return pd.Series({
             "RefundAmount": refund,
@@ -148,9 +180,9 @@ def compute_refund(row):
             "RefundCategory": reason
         })
 
-    # ----------------------------------------------------------------------
-    # Otherwise unclassified
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------
+    # 5) ANYTHING ELSE → MANUAL CHECK
+    # -------------------------------------------------
     return pd.Series({
         "RefundAmount": 0,
         "NewForefit": existing_forefit,
@@ -158,41 +190,36 @@ def compute_refund(row):
     })
 
 
-# Apply refund logic
-calc = df.apply(compute_refund, axis=1)
-df_result = df.join(calc)
+# Apply the logic
+df_result = df.join(df.apply(compute_refund, axis=1))
+
 
 # =========================
 # SUMMARY
 # =========================
 st.subheader("Summary")
 
-c1, c2, c3 = st.columns(3)
-with c1:
+col1, col2, col3 = st.columns(3)
+with col1:
     st.metric("Total Reg Fee Paid", f"{df_result['regfeepaid'].sum():,.2f}")
-with c2:
+with col2:
     st.metric("Total Refund", f"{df_result['RefundAmount'].sum():,.2f}")
-with c3:
+with col3:
     st.metric("Total Forfeit", f"{df_result['NewForefit'].sum():,.2f}")
 
 st.write("")
 st.subheader("Refund Output")
 st.dataframe(df_result, use_container_width=True)
 
-# =========================
-# DOWNLOAD AS EXCEL
-# =========================
-def to_excel_bytes(dataframe):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        dataframe.to_excel(writer, index=False, sheet_name="Refund")
-    return output.getvalue()
 
-excel_bytes = to_excel_bytes(df_result)
+# =========================
+# DOWNLOAD AS CSV (WORKS ON ALL STREAMLIT SERVERS)
+# =========================
+csv_output = df_result.to_csv(index=False).encode("utf-8")
 
 st.download_button(
-    label="Download Refund Excel",
-    data=excel_bytes,
-    file_name="refund_output.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    label="Download Refund CSV",
+    data=csv_output,
+    file_name="refund_output.csv",
+    mime="text/csv"
 )
